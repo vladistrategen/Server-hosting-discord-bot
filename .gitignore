@@ -1,0 +1,4 @@
+.env
+botEnv/
+subproc.log
+valheim_server.pid
