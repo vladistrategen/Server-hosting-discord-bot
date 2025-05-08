@@ -1,4 +1,15 @@
-.env
 botEnv/
+
+.env
+
+logs/
+
+pids/
+
 subproc.log
 valheim_server.pid
+
+__pycache__/
+*.pyc
+
+start.sh
