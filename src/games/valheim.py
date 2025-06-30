@@ -1,63 +1,61 @@
 import os
-import subprocess
-import asyncio
-import signal
+import re
 import secrets
 import string
-import re
 from games.base_game import BaseGameServer
 
+
 class ValheimServer(BaseGameServer):
+    Instances = {
+        "Pantelimon": {
+            "script_path": os.getenv("VALHEIM_SCRIPT_FILE_PATH")
+        }
+    }
+
     def __init__(self):
-        self.script_path = os.getenv("VALHEIM_SCRIPT_FILE_PATH")
-        self.process = None
-        self.password = self._generate_password()
-        super().__init__("valheim", self.script_path)
+        super().__init__("valheim")
+        self._invite_code = None
+        self._password = self._generate_password()
 
-    async def start(self, ctx):
-        self._create_log_file()
+    @property
+    def password(self) -> str:
+        return self._password
 
-        self.process = subprocess.Popen(
-            ["/bin/zsh", self.script_path, self.password],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            preexec_fn=os.setsid,
-            cwd=os.path.dirname(self.script_path),
-        )
-        self.save_pid()
-        self.mark_started()
-        asyncio.create_task(self._monitor_output(ctx))
+    async def handle_output_line(self, ctx, line: str):
+        # detect join code (sent once)
+        if "join code" in line and not self._invite_code:
+            match = re.search(r'join code (\d+)', line)
+            if match:
+                self._invite_code = match.group(1)
+                await ctx.channel.send(
+                    f"✅ **Valheim `{self.active_instance}` is live!**\n"
+                    f"🔗 **Join Code:** `{self._invite_code}`\n"
+                    f"🔑 **Password:** `{self._password}`"
+                )
+                await self._start_shutdown_timer(ctx, "no players joining in time")
 
-    async def _monitor_output(self, ctx):
-        invite_code = None
+        #detect player join
+        match = re.search(r'Player joined server.*?now (\d+) player', line)
+        if match:
+            count = int(match.group(1))
+            if count > 0:
+                self._cancel_shutdown_timer()
+                self.player_count = count
 
-        with open(self.log_file_path, "a") as log_file:
-            while True:
-                output = await asyncio.to_thread(self.process.stdout.readline)
-                if not output:
-                    break
-                line = output.decode("utf-8").strip()
-                log_file.write(f"[STDOUT] {line}\n")
-                log_file.flush()
+        #detect player disconnect
+        match = re.search(r'connection lost.*?now (\d+) player', line)
+        if match:
+            count = int(match.group(1))
+            self.player_count = count
+            if count == 0:
+                await self._start_shutdown_timer(ctx, "all players disconnected")
 
-                if "join code" in line and not invite_code:
-                    match = re.search(r'join code (\d+)', line)
-                    if match:
-                        invite_code = match.group(1)
-                        await ctx.channel.send(
-                            f"✅ **Valheim server is live!**\n🔗 **Join Code:** `{invite_code}`\n🔑 **Password:** `{self.password}`"
-                        )
-                        await self._start_shutdown_timer(ctx, "no players joining in time")
+    def get_launch_args(self, instance_config: dict) -> list:
+        """Override if your server requires extra args like password."""
+        return [instance_config["script_path"], self._password]
 
-                match = re.search(r'Player joined server.*?now (\d+) player', line)
-                if match and int(match.group(1)) > 0:
-                    self._cancel_shutdown_timer()
-                    self.player_count = int(match.group(1))
-
-                match = re.search(r'connection lost.*?now (\d+) player', line)
-                if match and int(match.group(1)) == 0:
-                    self.player_count = 0
-                    await self._start_shutdown_timer(ctx, "all players disconnected")
-
-    def _generate_password(self, length=10):
+    def _generate_password(self, length=10) -> str:
         return ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(length))
+
+    def get_launch_args(self, instance_config: dict) -> list:
+        return [instance_config["script_path"], self._password]

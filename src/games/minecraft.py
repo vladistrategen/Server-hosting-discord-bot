@@ -1,83 +1,55 @@
 import os
-import subprocess
-import asyncio
-import signal
 import socket
 import re
 from games.base_game import BaseGameServer
 
+
 class MinecraftServer(BaseGameServer):
+    Instances = {
+        "Modded 1.21.1 NeoForge BMC5": {
+            "script_path": os.getenv("MINECRAFT_MODDED_1_21_1_NEOFORGE_BMC5_SCRIPT_FILE_PATH")
+        },
+        "Vanilla Fabric 1.21.5": {
+            "script_path": os.getenv("MINECRAFT_VANILLA_FABRIC_1_21_5_SCRIPT_FILE_PATH")
+        },
+    }
+
     def __init__(self):
-        self.script_path = os.getenv("MINECRAFT_SCRIPT_FILE_PATH")
-        self.process = None
-        self.timer_task = None
-        self.timer_duration = 120
-        super().__init__("minecraft", self.script_path)
+        super().__init__("minecraft")
 
-
-    async def start(self, ctx):
-        try:
-            self._create_log_file()
-            self.process = subprocess.Popen(
-                ["/bin/zsh", self.script_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                preexec_fn=os.setsid,
-                cwd=os.path.dirname(self.script_path),
+    async def handle_output_line(self, ctx, line: str):
+        if "Done" in line:
+            ip = self._get_local_ip()
+            await ctx.channel.send(
+                f"✅ **Minecraft `{self.active_instance}` is live!**\n🌐 IP: `{ip}:25565` using ZeroTier"
             )
-            self.save_pid()
-            asyncio.create_task(self._log_output(ctx))
-        except Exception as e:
-            await ctx.channel.send(f"❌ Failed to start Minecraft: {e}")
+            await self._start_shutdown_timer(ctx, reason="no players joined")
 
-    async def _log_output(self, ctx):
-        if not self.process or not self.process.stdout:
-            print(f"[{self.name}] ❌ Cannot log output — process is not running.")
-            return
+        elif "joined the game" in line:
+            self._cancel_shutdown_timer()
+            self.player_count += 1
+            await ctx.channel.send("🎮 A player joined. Shutdown cancelled.")
 
-        with open(self.log_file_path, "a") as log_file:
-            while True:
-                output = await asyncio.to_thread(self.process.stdout.readline)
-                if not output:
-                    break
-                line = output.decode("utf-8").strip()
-                log_file.write(f"[MC] {line}\n")
-                log_file.flush()
+        elif "left the game" in line:
+            self.player_count -= 1
+            if self.player_count == 0:
+                await ctx.channel.send("👤 All players left. Starting shutdown timer.")
+                await self._start_shutdown_timer(ctx, reason="all players left")
 
-                if "Done" in line:
-                    ip = self._get_local_ip()
-                    await ctx.channel.send(
-                        f"✅ **Minecraft server is live with ZeroTier!**\n🌐 IP: `{ip}:25565`"
-                    )
-                    await self._start_shutdown_timer(ctx, reason="no players joined")
-                
-                if "Shutting down" in line:
-                    self.process = None
-                    if "[main/ERROR]" in line:
-                        await ctx.channel.send("❌ **Minecraft server encountered an error and is shutting down.**")
-                        break
-                    await ctx.channel.send("🛑 **Minecraft server is shutting down.**")
-                    break
+        elif "Shutting down" in line:
+            if "[main/ERROR]" in line:
+                await ctx.channel.send("❌ Server crashed.")
+            else:
+                await ctx.channel.send("🛑 Minecraft server is shutting down.")
+            self._process = None
 
-                if "joined the game" in line:
-                    self._cancel_shutdown_timer()
-                    self.player_count += 1
-                    await ctx.channel.send("🎮 A player joined. Canceling shutdown timer.")
-
-                if "left the game" in line:
-                    self.player_count -= 1
-                    if self.player_count == 0:
-                        await ctx.channel.send("👤 All players left. Starting shutdown timer.")
-                        await self._start_shutdown_timer(ctx, reason="all players left")
-                        
-    def _get_local_ip(self):
+    def _get_local_ip(self) -> str:
         try:
-            zt_output = os.popen("zerotier-cli listnetworks").read()
-            for line in zt_output.splitlines():
-                match = re.search(r'(\d{1,3}(?:\.\d{1,3}){3})\/\d+$', line)
-                if match:
-                    return match.group(1)
-        except Exception:
+            out = os.popen("zerotier-cli listnetworks").read()
+            match = re.search(r'(\d{1,3}(?:\.\d{1,3}){3})\/\d+', out)
+            if match:
+                return match.group(1)
+        except:
             pass
 
         try:
@@ -86,5 +58,5 @@ class MinecraftServer(BaseGameServer):
             ip = s.getsockname()[0]
             s.close()
             return ip
-        except Exception:
+        except:
             return "Unknown"
